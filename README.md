@@ -1,108 +1,122 @@
+Reference DeepSet Model
 
-# CF-NODE
+This directory contains the reference DeepSet model used during the development and evaluation of CF-NODE.
 
-## Counterfactual Lesion Node Editing for Test-Time Adaptation Under Domain Shift in Diabetic Retinopathy Grading
+The purpose of this model is to demonstrate the feature representations required by CF-NODE. It is not a required architecture—any model that provides compatible outputs can be used.
 
-PyTorch implementation of **CF-NODE**, a Test-Time Adaptation (TTA) framework for improving domain robustness under domain shift in diabetic retinopathy grading through counterfactual lesion node editing.
+⸻
 
-> **CF-NODE: Counterfactual Spatial Node Intervention for Test-Time Adaptation in Diabetic Retinopathy Grading**
+Folder Contents
 
-<img width="2500" height="1406" alt="CF_Node_FLow (2)" src="https://github.com/user-attachments/assets/c5d90dfc-3d23-4e2b-888c-d04a242faee9" />
- " />
+model/
+├── config.py      # Training configuration
+├── model.py       # DeepSet model implementation
+├── train.py       # Reference training script
+└── README.md
 
----
+⸻
 
-## Overview
+Model Architecture
 
-CF-NODE is a training-free Test-Time Adaptation framework that improves the robustness of diabetic retinopathy grading models under domain shift by identifying important lesion representations, generating counterfactual feature interventions, and refining predictions using ordinal reasoning and source prior correction.
+The reference model consists of:
 
----
+* ResNet50 backbone for feature extraction
+* GeM Pooling for global image representation
+* DeepSet-inspired node representation
+* Attention-based node pooling
+* Residual feature fusion
+* Classification head
 
-## Repository Structure
+This architecture was designed for diabetic retinopathy grading under domain shift and was used to evaluate CF-NODE.
 
-```text
-CF-NODE/
+⸻
 
-├── cfnode/
-│   ├── cfnode.py
-│   ├── config.py
-│   └── __init__.py
-│
-├── model/
-│   ├── model.py
-│   ├── train.py
-│   ├── config.py
-│   └── README.md
-│
-├── figures/
-│
-├── README.md
-├── requirements.txt
-└── LICENSE
-```
+Model Outputs
 
----
+When calling:
 
-## Installation
+logits, node_features = model(images)
 
-```bash
-git clone https://github.com/yourusername/CF-NODE.git
+the model returns two outputs.
 
-cd CF-NODE
+1. Classification Logits
 
-pip install -r requirements.txt
-```
+Shape:
+(B, C)
+Example:
+(8, 5)
 
----
+Final classification logits for diabetic retinopathy grading.
 
-## Train the Reference Model
+⸻
 
-The repository includes the DeepSet reference model used in our experiments.
+2. Node Features
 
-```bash
-python model/train.py
-```
+Shape:
+(B, N, D)
+Example:
+(8, 100, 128)
 
----
+Feature embeddings extracted from the final feature map.
 
-## Apply CF-NODE
+Each spatial location is treated as a node. A node is an internal representation and is not assumed to correspond directly to a pathological structure.
 
-CF-NODE expects the model to return
+These node features are the primary input used by CF-NODE for counterfactual spatial node intervention.
 
-```python
+⸻
+
+Compatibility with CF-NODE
+
+CF-NODE expects the model to return:
+
 (
     logits,
-    node_features,
-    ordinal_logits
+    node_features
 )
-```
 
-Once the model follows this interface, CF-NODE can be integrated directly into the inference pipeline.
+If your own model follows the same output format, it can be used with CF-NODE without modifying the algorithm.
 
-```python
-from cfnode.cfnode import run_tta
+⸻
 
-predictions = run_tta(
-    model,
-    loader,
-    cfg
-)
-```
+Training
 
----
+The provided train.py script demonstrates one training strategy for this reference model.
 
-## Reference Model
+It includes:
 
-The `model/` directory contains the complete DeepSet reference implementation used in our experiments, including
+* Progressive backbone fine-tuning
+* Mixed Precision (AMP)
+* Exponential Moving Average (EMA)
+* Cross Entropy + Focal Loss
+* Cosine Annealing Warm Restarts
+* Early stopping
 
-- model architecture
-- training configuration
-- training script
+Researchers are free to train their own models using any optimization strategy.
 
-The reference model can be used directly or adapted for other datasets.
+CF-NODE is independent of the training procedure.
 
----
+⸻
 
-## License
+Using Your Own Model
 
-This project is released under the MIT License. See the `LICENSE` file for details.
+You are not required to use this DeepSet architecture.
+
+You may replace it with any model, including:
+
+* ResNet
+* EfficientNet
+* ConvNeXt
+* Vision Transformer (ViT)
+* Swin Transformer
+* DenseNet
+* Custom architectures
+
+As long as the model returns compatible outputs, CF-NODE can be integrated without changing the core algorithm.
+
+⸻
+
+Notes
+
+This model is provided as a reference implementation to help researchers understand the expected feature representations used by CF-NODE.
+
+The core contribution of this repository is the CF-NODE algorithm, while this model serves as an example of one compatible implementation.
