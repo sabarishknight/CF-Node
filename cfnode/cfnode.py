@@ -1,12 +1,13 @@
 """
 ======================================================================
 CF-NODE
-Counterfactual Lesion Node Editing for Test-Time Adaptation
+Counterfactual Spatial Node Intervention for Test-Time Adaptation
 
 Official implementation accompanying the paper:
 
-"Counterfactual Lesion Node Editing for Test-Time Adaptation
-Under Domain Shift in Diabetic Retinopathy Grading"
+"CF-NODE: Counterfactual Spatial Node Intervention for
+Test-Time Adaptation Under Domain Shift in Diabetic
+Retinopathy Grading"
 
 ----------------------------------------------------------------------
 
@@ -17,8 +18,13 @@ source-free and label-free Test-Time Adaptation (TTA).
 
 CF-NODE improves the robustness of diabetic retinopathy
 grading models under domain shift by performing
-counterfactual lesion node editing directly on intermediate
-feature representations.
+counterfactual spatial node intervention directly on
+intermediate feature representations.
+
+The source model remains fully frozen. Each image is adapted
+independently, without target labels, target-domain
+statistics, gradients, parameter updates, or cross-image
+adaptation state.
 
 ----------------------------------------------------------------------
 
@@ -30,8 +36,7 @@ PyTorch-based diabetic retinopathy grading models.
 Your model should provide:
 
     • Classification logits
-    • Lesion node features
-    • Ordinal logits (optional but recommended)
+    • Spatial node features
 
 A complete compatible implementation is provided in:
 
@@ -57,18 +62,22 @@ import numpy as np
 
 # =========================================================
 # DEFAULT SOURCE PRIOR
-# EyePACS empirical prior — the working v1 configuration.
+#
+# EyePACS empirical class distribution, computed from the
+# full training set before balanced subsampling.
 # =========================================================
 DEFAULT_SOURCE_PRIOR = torch.tensor([
-    0.73,
-    0.07,
-    0.15,
-    0.025,
-    0.025,
+    0.734783,
+    0.069550,
+    0.150658,
+    0.024853,
+    0.020156,
 ]).float()
 
 # =========================================================
-# COUNTERFACTUAL SUPPRESSION SCHEDULE
+# COUNTERFACTUAL INTERVENTION SCHEDULE
+#
+# Each pair is (node fraction, retained magnitude).
 # =========================================================
 DEFAULT_CF_LEVELS = (
 
@@ -103,43 +112,6 @@ AUGMENTATIONS = [
 def _cfg(cfg, key, default):
 
     return getattr(cfg, key, default)
-
-# =========================================================
-# RESOLVE CF STRENGTH
-#
-# Default 1.0 → v1 behaviour preserved.
-# =========================================================
-def _resolve_cf_strength(cfg):
-
-    cf = _cfg(cfg, 'cf_strength', 1.0)
-
-    if isinstance(cf, dict):
-
-        name = (
-            _cfg(cfg, 'target_name',    None)
-            or _cfg(cfg, 'target_dataset', None)
-            or _cfg(cfg, 'dataset',     None)
-            or _cfg(cfg, 'target',      None)
-            or _cfg(cfg, 'domain',      None)
-        )
-
-        if isinstance(name, str):
-
-            name = name.lower()
-
-        if name is not None and name in cf:
-
-            cf = cf[name]
-
-        elif 'default' in cf:
-
-            cf = cf['default']
-
-        else:
-
-            cf = 1.0
-
-    return float(cf)
 
 # =========================================================
 # RESOLVE SOURCE PRIOR
@@ -189,6 +161,9 @@ def get_base_model(model):
 
 # =========================================================
 # FORWARD WITH NODES
+#
+# Returns the class logits and the spatial node features.
+# Any additional model outputs are ignored.
 # =========================================================
 def forward_with_nodes(model, x):
 
@@ -196,30 +171,22 @@ def forward_with_nodes(model, x):
 
     if isinstance(out, tuple):
 
-        if len(out) == 3:
+        if len(out) >= 2:
 
-            logits, nodes, ordinal_logits = out
-            pooled = None
-
-        elif len(out) == 4:
-
-            logits, nodes, ordinal_logits, pooled = out
+            logits = out[0]
+            nodes = out[1]
 
         else:
 
             logits = out[0]
             nodes = None
-            ordinal_logits = None
-            pooled = None
 
     else:
 
         logits = out
         nodes = None
-        ordinal_logits = None
-        pooled = None
 
-    return logits, nodes, ordinal_logits, pooled
+    return logits, nodes
 
 # =========================================================
 # EXPECTED GRADE
@@ -232,41 +199,6 @@ def expected_grade_from_probs(probs):
     ).float()
 
     return (probs * grades).sum(dim=-1)
-
-# =========================================================
-# ORDINAL → CLASS PROBS
-# =========================================================
-def ordinal_logits_to_probs(ordinal_logits, num_classes=5):
-
-    B      = ordinal_logits.size(0)
-    device = ordinal_logits.device
-
-    cum_probs = torch.sigmoid(ordinal_logits)
-
-    ones  = torch.ones(B, 1, device=device)
-    zeros = torch.zeros(B, 1, device=device)
-
-    cum_full = torch.cat(
-        [ones, cum_probs, zeros],
-        dim=1
-    )
-
-    class_probs = (
-        cum_full[:, :-1]
-        - cum_full[:, 1:]
-    )
-
-    class_probs = torch.clamp(
-        class_probs,
-        min=1e-6
-    )
-
-    class_probs = class_probs / (
-        class_probs.sum(dim=-1, keepdim=True)
-        + 1e-8
-    )
-
-    return class_probs
 
 # =========================================================
 # ATTENTION SCORES
@@ -282,7 +214,7 @@ def get_attention_scores(model, nodes):
     return torch.softmax(scores, dim=1)
 
 # =========================================================
-# CLUSTER CONSISTENCY
+# NODE-SET SIMILARITY
 # =========================================================
 def compute_cluster_consistency(nodes):
 
@@ -309,19 +241,21 @@ def compute_cluster_consistency(nodes):
     )
 
 # =========================================================
-#  ESTIMATE LESION NODE IMPORTANCE
+#  ESTIMATE SPATIAL NODE IMPORTANCE
 #
 # Purpose
 # -------
-# Computes the importance score for every lesion node by
+# Computes the importance score for every spatial node by
 # combining:
 #
-# • Attention score
+# • Attention weight
 # • Feature magnitude
-# • Cluster consistency
+# • Node-set similarity
 #
 # Higher scores indicate stronger influence on the current
-# prediction.
+# prediction. This ranking selects the representations to be
+# intervened on. It does not determine whether they contain
+# pathological or domain-specific information.
 # =========================================================
 def compute_node_scores(attn_scores, nodes):
 
@@ -341,12 +275,12 @@ def compute_node_scores(attn_scores, nodes):
     )
 
 # =========================================================
-# BUILD COUNTERFACTUAL LESION NODES
+# BUILD COUNTERFACTUAL SPATIAL NODES
 #
 # Purpose
 # -------
 # Creates multiple counterfactual feature representations
-# by progressively suppressing the most important lesion
+# by progressively attenuating the highest-ranked spatial
 # nodes identified in the current image.
 #
 # Input
@@ -357,7 +291,7 @@ def compute_node_scores(attn_scores, nodes):
 # Output
 # ------
 # cf_nodes_all  : Counterfactual node representations
-# num_cf        : Number of counterfactual views
+# num_cf        : Number of intervention levels
 # =========================================================
 def build_counterfactual_nodes(
     nodes,
@@ -379,7 +313,7 @@ def build_counterfactual_nodes(
 
     cf_nodes_all = []
 
-    for ratio, suppression in cf_levels:
+    for ratio, retained in cf_levels:
 
         k = max(int(N * ratio), 1)
 
@@ -392,7 +326,7 @@ def build_counterfactual_nodes(
         scaling.scatter_(
             1,
             top_idx.unsqueeze(-1).expand(-1, -1, D),
-            suppression
+            retained
         )
 
         cf_nodes_all.append(
@@ -442,9 +376,12 @@ def classify_cf_nodes(model, cf_nodes, global_feat):
     return logits
 
 # =========================================================
-# STABLE CAUSAL DROP
+# STABLE INTERVENTION SENSITIVITY
+#
+# Mean one-sided expected-grade reduction, normalized by its
+# variation across intervention levels.
 # =========================================================
-def compute_stable_causal_drop(exp_orig, exp_cf):
+def compute_stable_intervention_sensitivity(exp_orig, exp_cf):
 
     drops = F.relu(
         exp_orig.unsqueeze(0) - exp_cf
@@ -455,32 +392,6 @@ def compute_stable_causal_drop(exp_orig, exp_cf):
     std_drop = drops.std(dim=0)
 
     return mean_drop / (std_drop + 0.15)
-
-# =========================================================
-# BLEND WEIGHT  (v1 formula — DO NOT CHANGE)
-# =========================================================
-def compute_blend_weight(stable_drop, confidence, cfg):
-
-    sensitivity = _cfg(
-        cfg,
-        'sensitivity_threshold',
-        0.08
-    )
-
-    cf_strength = _resolve_cf_strength(cfg)
-
-    causal_gate = torch.sigmoid(
-        5.0 * (stable_drop - sensitivity)
-    )
-
-    uncertainty = 1.0 - confidence
-
-    alpha = cf_strength * (
-        0.05 * causal_gate
-        + 0.55 * causal_gate * uncertainty
-    )
-
-    return torch.clamp(alpha, 0.0, 0.65)
 
 # =========================================================
 # SOURCE PRIOR CORRECTION  (v1 formula — DO NOT CHANGE)
@@ -539,7 +450,7 @@ def _cf_node_single_view(model, images, cfg):
     # =====================================================
     # ORIGINAL FORWARD
     # =====================================================
-    logits_orig, nodes, ordinal_logits, _ = forward_with_nodes(
+    logits_orig, nodes = forward_with_nodes(
         model,
         images
     )
@@ -552,12 +463,6 @@ def _cf_node_single_view(model, images, cfg):
     exp_orig = expected_grade_from_probs(
         probs_orig
     )
-
-    confidence = probs_orig.max(
-        dim=1
-    ).values
-
-    num_classes = probs_orig.size(-1)
 
     # =====================================================
     # FALLBACK
@@ -626,15 +531,15 @@ def _cf_node_single_view(model, images, cfg):
     ).view(num_cf, B)
 
     # =====================================================
-    # STABLE DROP
+    # STABLE SENSITIVITY SCORE
     # =====================================================
-    stable_drop = compute_stable_causal_drop(
+    stable_drop = compute_stable_intervention_sensitivity(
         exp_orig,
         exp_cf
     )
 
     # =====================================================
-    # CAUSAL TEMPERATURE
+    # SENSITIVITY-DEPENDENT TEMPERATURE
     # =====================================================
     sample_temp = (
         base_temp
@@ -648,38 +553,10 @@ def _cf_node_single_view(model, images, cfg):
     )
 
     # =====================================================
-    # ORDINAL BLEND
-    # =====================================================
-    if ordinal_logits is not None:
-
-        ordinal_probs = ordinal_logits_to_probs(
-            ordinal_logits,
-            num_classes=num_classes
-        )
-
-    else:
-
-        ordinal_probs = probs_orig
-
-    # =====================================================
-    # BLEND
-    # =====================================================
-    alpha = compute_blend_weight(
-        stable_drop,
-        confidence,
-        cfg
-    ).unsqueeze(-1)
-
-    blended_probs = (
-        (1.0 - alpha) * probs_orig
-        + alpha * ordinal_probs
-    )
-
-    # =====================================================
-    # TEMPERATURE SHARPEN
+    # BOUNDED CALIBRATION
     # =====================================================
     final_logits = (
-        torch.log(blended_probs + 1e-8)
+        torch.log(probs_orig + 1e-8)
         / sample_temp.unsqueeze(-1)
     )
 
@@ -828,5 +705,3 @@ def run_tta(model, loader, cfg, return_probs=False):
         )
 
     return preds_all, labels_all
-
-
